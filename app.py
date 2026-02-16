@@ -1,102 +1,63 @@
 import streamlit as st
+from streamlit_gsheets import GSheetsConnection
 import pandas as pd
-import os
 from datetime import datetime
 
-# --- CONFIGURAÇÕES E FICHEIROS ---
-ARQUIVO_PRODUTOS = "produtos.csv"
-ARQUIVO_REGISTOS = "registos_validade.csv"
+# --- CONFIGURAÇÃO DA PÁGINA ---
+st.set_page_config(page_title="App Validades Google", layout="wide")
 
-def carregar_dados(arquivo, colunas):
-    if os.path.exists(arquivo):
-        return pd.read_csv(arquivo)
-    return pd.DataFrame(columns=colunas)
+# --- CONEXÃO COM GOOGLE SHEETS ---
+# Nota: O URL da folha deve ser colocado nos "Secrets" do Streamlit Cloud
+conn = st.connection("gsheets", type=GSheetsConnection)
 
-def guardar_dados(df, arquivo):
-    df.to_csv(arquivo, index=False)
+# --- FUNÇÕES DE DADOS ---
+def ler_produtos():
+    return conn.read(worksheet="produtos", ttl=0) # ttl=0 força a ler dados frescos
 
-# --- INICIALIZAÇÃO ---
-st.set_page_config(page_title="Gestor de Validades Pro", layout="wide")
+def ler_registos():
+    return conn.read(worksheet="registos", ttl=0)
 
-# Carregar dados existentes
-if 'df_produtos' not in st.session_state:
-    st.session_state.df_produtos = carregar_dados(ARQUIVO_PRODUTOS, ["nome", "descricao"])
-if 'df_registos' not in st.session_state:
-    st.session_state.df_registos = carregar_dados(ARQUIVO_REGISTOS, ["produto", "data", "hora", "data_registo"])
-
-# --- INTERFACE DE LOGIN ---
-def login():
-    st.title("🔐 Login de Equipa")
+# --- LOGIN (Simplificado) ---
+if 'logged_in' not in st.session_state:
+    st.title("🔐 Login")
     user = st.text_input("Utilizador")
-    pw = st.text_input("Password", type="password")
     if st.button("Entrar"):
-        if user == "admin" and pw == "admin123":
-            st.session_state.logged_in = True
-            st.session_state.perfil = "admin"
-            st.rerun()
-        elif user == "user" and pw == "user123":
-            st.session_state.logged_in = True
-            st.session_state.perfil = "user"
-            st.rerun()
-        else:
-            st.error("Dados inválidos!")
+        st.session_state.logged_in = True
+        st.session_state.perfil = "admin" if user == "admin" else "user"
+        st.rerun()
 
-# --- PAINEL ADMIN ---
-def interface_admin():
-    st.title("🛠 Gestão Administrativa")
-    tab1, tab2 = st.tabs(["➕ Cadastrar Produtos", "📊 Dashboard de Controlo"])
+# --- LOGICA ADMIN ---
+elif st.session_state.perfil == "admin":
+    st.title("🛠 Admin - Google Sheets Mode")
+    
+    # Criar Novo Produto
+    with st.form("add_produto"):
+        nome = st.text_input("Nome do Produto")
+        desc = st.text_input("Validade Padrão")
+        if st.form_submit_button("Gravar no Google Sheets"):
+            df_atual = ler_produtos()
+            novo_p = pd.DataFrame([{"nome": nome, "descricao": desc}])
+            df_final = pd.concat([df_atual, novo_p], ignore_index=True)
+            conn.update(worksheet="produtos", data=df_final)
+            st.success("Guardado na Nuvem!")
 
-    with tab1:
-        with st.form("novo_produto"):
-            nome = st.text_input("Nome do Produto")
-            desc = st.text_input("Tempo de vida (ex: 30 dias)")
-            submeter = st.form_submit_button("Gravar Produto")
-            
-            if submeter and nome:
-                nova_linha = pd.DataFrame([{"nome": nome, "descricao": desc}])
-                st.session_state.df_produtos = pd.concat([st.session_state.df_produtos, nova_linha], ignore_index=True)
-                guardar_dados(st.session_state.df_produtos, ARQUIVO_PRODUTOS)
-                st.success("Produto guardado no ficheiro!")
-
-    with tab2:
-        st.subheader("Histórico de Registos")
-        st.dataframe(st.session_state.df_registos, use_container_width=True)
-        # Botão para o Admin baixar o relatório
-        csv = st.session_state.df_registos.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Descarregar Excel (CSV)", csv, "relatorio_validades.csv", "text/csv")
-
-# --- PAINEL USER ---
-def interface_user():
-    st.title("📦 Registo de Validade")
-    if st.session_state.df_produtos.empty:
-        st.info("Nenhum produto disponível. Contacte o Admin.")
-        return
-
-    produto_sel = st.selectbox("Selecione o Produto", st.session_state.df_produtos["nome"])
-    data_val = st.date_input("Data de Validade")
-    sem_hora = st.checkbox("Registar sem hora")
-    hora_val = st.time_input("Hora") if not sem_hora else "00:00"
-
-    if st.button("Submeter Registo"):
-        novo_registo = pd.DataFrame([{
+# --- LOGICA USER ---
+else:
+    st.title("📦 Registo de Equipa")
+    df_p = ler_produtos()
+    
+    produto_sel = st.selectbox("Escolha o Produto", df_p["nome"])
+    data_v = st.date_input("Validade")
+    sem_hora = st.checkbox("Sem hora")
+    
+    if st.button("Enviar Registo"):
+        df_r = ler_registos()
+        novo_r = pd.DataFrame([{
             "produto": produto_sel,
-            "data": data_val,
-            "hora": "N/A" if sem_hora else hora_val,
+            "data": str(data_v),
+            "hora": "N/A" if sem_hora else datetime.now().strftime("%H:%M"),
             "data_registo": datetime.now().strftime("%d/%m/%Y %H:%M")
         }])
-        st.session_state.df_registos = pd.concat([st.session_state.df_registos, novo_registo], ignore_index=True)
-        guardar_dados(st.session_state.df_registos, ARQUIVO_REGISTOS)
-        st.success(f"Registo de {produto_sel} efetuado!")
-
-# --- LÓGICA PRINCIPAL ---
-if 'logged_in' not in st.session_state:
-    login()
-else:
-    if st.sidebar.button("Terminar Sessão"):
-        st.session_state.clear()
-        st.rerun()
-    
-    if st.session_state.perfil == "admin":
-        interface_admin()
-    else:
-        interface_user()
+        df_f = pd.concat([df_r, novo_r], ignore_index=True)
+        conn.update(worksheet="registos", data=df_f)
+        st.success("Registo enviado para o Google Sheets!")
